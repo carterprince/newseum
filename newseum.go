@@ -49,6 +49,7 @@ func main() {
 	app := tview.NewApplication()
 	table := tview.NewTable().SetSelectable(true, false)
 	table.SetBackgroundColor(tcell.ColorDefault)
+    table.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
 	now := time.Now().UTC() // Use UTC for consistency
 	for i, item := range items {
