@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"sync"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/mmcdole/gofeed"
@@ -103,7 +104,7 @@ func main() {
             } else {
                 url = items[row].Link
             }
-            err := openBrowser(url)
+            err := openURL(url)
             if err != nil {
                 fmt.Println("Error opening browser:", err)
             }
@@ -194,49 +195,98 @@ func getFeedSources() ([]FeedSource, error) {
 
 func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
     var items []FeedItem
+    var mutex sync.Mutex
     fp := gofeed.NewParser()
 
-    totalFeeds := len(feedSources)
-    for i, source := range feedSources {
-        fmt.Printf("\rFetching %d/%d feeds...", i+1, totalFeeds)
-
-        feed, err := fp.ParseURL(source.URL)
-        if err != nil {
-            fmt.Printf("\nError parsing feed %s: %v\n", source.URL, err)
-            continue
-        }
-
-        feedTitle := source.Name
-        if feedTitle == "" {
-            feedTitle = feed.Title
-        }
-
-        for _, item := range feed.Items {
-            pubDate := time.Now().UTC() // Default to current UTC time
-            if item.PublishedParsed != nil {
-                pubDate = item.PublishedParsed.UTC() // Ensure the time is in UTC
-            }
-
-            audioURL := ""
-            for _, enclosure := range item.Enclosures {
-                if strings.HasPrefix(enclosure.Type, "audio/") {
-                    audioURL = enclosure.URL
-                    break
+    // Create channels for work distribution and results
+    jobs := make(chan FeedSource)
+    results := make(chan error)
+    
+    // Number of concurrent workers (can be adjusted)
+    workers := 5
+    
+    // Start worker pool
+    var wg sync.WaitGroup
+    for w := 0; w < workers; w++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for source := range jobs {
+                feed, err := fp.ParseURL(source.URL)
+                if err != nil {
+                    results <- fmt.Errorf("error parsing feed %s: %v", source.URL, err)
+                    continue
                 }
-            }
 
-            items = append(items, FeedItem{
-                Title:     item.Title,
-                Date:      pubDate,
-                FeedTitle: feedTitle,
-                Link:      item.Link,
-                AudioURL:  audioURL,
-            })
-        }
+                feedTitle := source.Name
+                if feedTitle == "" {
+                    feedTitle = feed.Title
+                }
+
+                var feedItems []FeedItem
+                for _, item := range feed.Items {
+                    pubDate := time.Now().UTC()
+                    if item.PublishedParsed != nil {
+                        pubDate = item.PublishedParsed.UTC()
+                    }
+
+                    audioURL := ""
+                    for _, enclosure := range item.Enclosures {
+                        if strings.HasPrefix(enclosure.Type, "audio/") {
+                            audioURL = enclosure.URL
+                            break
+                        }
+                    }
+
+                    feedItems = append(feedItems, FeedItem{
+                        Title:     item.Title,
+                        Date:      pubDate,
+                        FeedTitle: feedTitle,
+                        Link:      item.Link,
+                        AudioURL:  audioURL,
+                    })
+                }
+
+                mutex.Lock()
+                items = append(items, feedItems...)
+                mutex.Unlock()
+                
+                results <- nil
+            }
+        }()
     }
 
+    // Create progress counter
+    progress := 0
+    totalFeeds := len(feedSources)
+    
+    // Start a goroutine to distribute work
+    go func() {
+        for _, source := range feedSources {
+            jobs <- source
+        }
+        close(jobs)
+    }()
+
+    // Start a goroutine to collect results and update progress
+    go func() {
+        for range feedSources {
+            err := <-results
+            progress++
+            if err != nil {
+                fmt.Printf("\n%v", err)
+            }
+            fmt.Printf("\rFetching %d/%d feeds...", progress, totalFeeds)
+        }
+        wg.Wait()
+        close(results)
+    }()
+
+    // Wait for all workers to complete
+    wg.Wait()
     fmt.Println("\rFinished fetching all feeds.           ")
 
+    // Sort items by date
     sort.Slice(items, func(i, j int) bool {
         return items[i].Date.After(items[j].Date)
     })
@@ -244,19 +294,52 @@ func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
     return items, nil
 }
 
-func openBrowser(url string) error {
-	var cmd string
-	var args []string
+func openURL(url string) error {
+    lowerURL := strings.ToLower(url)
+    
+    // Check for media URLs
+    isAudio := regexp.MustCompile(`\.(mp3|wav)(?:\?.*)?$`).MatchString(lowerURL)
+    isYoutube := strings.Contains(lowerURL, "youtube.com") || strings.Contains(lowerURL, "youtu.be")
+    
+    if (isAudio || isYoutube) && runtime.GOOS == "linux" {
+        var mimeType string
+        if isYoutube {
+            mimeType = "video/mp4" // More appropriate for YouTube content
+        } else if strings.Contains(lowerURL, ".mp3") {
+            mimeType = "audio/mpeg"
+        } else {
+            mimeType = "audio/wav"
+        }
 
-	switch runtime.GOOS {
-	case "windows":
-		cmd = "cmd"
-		args = []string{"/c", "start"}
-	case "darwin":
-		cmd = "open"
-	default: // "linux", "freebsd", "openbsd", "netbsd"
-		cmd = "xdg-open"
-	}
-	args = append(args, url)
-	return exec.Command(cmd, args...).Start()
+        // Get default application for media type
+        cmd := exec.Command("xdg-mime", "query", "default", mimeType)
+        output, err := cmd.Output()
+        if err != nil {
+            return fmt.Errorf("error querying default media application: %v", err)
+        }
+        
+        desktopFile := strings.TrimSpace(string(output))
+        if desktopFile == "" {
+            return fmt.Errorf("no default application found for %s", mimeType)
+        }
+
+        // Launch the media file with the default application
+        return exec.Command("gtk-launch", desktopFile, url).Start()
+    }
+
+    // For non-media files or non-Linux systems, use the original browser opening logic
+    var cmd string
+    var args []string
+
+    switch runtime.GOOS {
+    case "windows":
+        cmd = "cmd"
+        args = []string{"/c", "start"}
+    case "darwin":
+        cmd = "open"
+    default: // "linux", "freebsd", "openbsd", "netbsd"
+        cmd = "xdg-open"
+    }
+    args = append(args, url)
+    return exec.Command(cmd, args...).Start()
 }
