@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Newseum
+GenericName=RSS Reader
+Comment=View your feed
+Icon=org.gnome.Console
+Exec=newseum
+Terminal=true
+Categories=ConsoleOnly;
