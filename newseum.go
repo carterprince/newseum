@@ -25,11 +25,13 @@ type FeedSource struct {
 }
 
 type FeedItem struct {
-	Title     string
-	Date      time.Time
-	FeedTitle string
-	Link      string
-	AudioURL  string
+	Title       string
+	Date        time.Time
+	FeedTitle   string
+	Link        string
+	AudioURL    string
+	Description string
+	SearchText  string
 }
 
 func main() {
@@ -52,57 +54,191 @@ func main() {
 	table.SetBackgroundColor(tcell.ColorDefault)
     table.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
-	now := time.Now().UTC() // Use UTC for consistency
-	for i, item := range items {
-		dateStr := " " + formatDate(item.Date, now)
-		titleStr := FormatString(" " + CleanString(item.Title), 75)
-		feedStr := FormatString(" " + CleanString(item.FeedTitle), 25)
+	// Preview pane
+	preview := tview.NewTextView().
+		SetDynamicColors(true).
+		SetWordWrap(true).
+		SetScrollable(true)
+	preview.SetBackgroundColor(tcell.ColorDefault)
+	preview.SetBorder(true).SetTitle(" Preview ")
 
-		title := tview.NewTableCell(titleStr).SetTextColor(tcell.GetColor("red"))
-		feed := tview.NewTableCell(feedStr).SetTextColor(tcell.GetColor("green"))
+	// Search state
+	var searchQuery string
+	filteredItems := items
 
-		table.SetCell(i, 0, feed)
-		table.SetCell(i, 1, title)
-		table.SetCellSimple(i, 2, dateStr)
+	// Function to update table with current items
+	updateTable := func(itemsToShow []FeedItem) {
+		table.Clear()
+		now := time.Now().UTC()
+		for i, item := range itemsToShow {
+			dateStr := " " + formatDate(item.Date, now)
+			titleStr := FormatString(" "+CleanString(item.Title), 75)
+			feedStr := FormatString(" "+CleanString(item.FeedTitle), 25)
+
+			title := tview.NewTableCell(titleStr).SetTextColor(tcell.GetColor("red"))
+			feed := tview.NewTableCell(feedStr).SetTextColor(tcell.GetColor("green"))
+
+			table.SetCell(i, 0, feed)
+			table.SetCell(i, 1, title)
+			table.SetCellSimple(i, 2, dateStr)
+		}
+		if len(itemsToShow) > 0 {
+			table.Select(0, 0)
+		}
 	}
 
-	table.Select(0, 0).SetDoneFunc(func(key tcell.Key) {
+	// Function to update preview
+	updatePreview := func() {
+		row, _ := table.GetSelection()
+		if row >= 0 && row < len(filteredItems) {
+			item := filteredItems[row]
+			previewText := fmt.Sprintf("[yellow]%s[-]\n\n[green]%s[-]\n%s\n\n%s",
+				item.Title,
+				item.FeedTitle,
+				formatDate(item.Date, time.Now().UTC()),
+				CleanString(item.Description))
+			preview.SetText(previewText)
+			preview.ScrollToBeginning()
+		}
+	}
+
+	updateTable(filteredItems)
+	updatePreview()
+
+	// Search input field
+	searchInput := tview.NewInputField().SetLabel("")
+	searchInput.SetBackgroundColor(tcell.Color16)
+    searchInput.SetFieldStyle(tcell.StyleDefault.Background(tcell.Color16).Foreground(tcell.ColorWhite))
+	searchInput.SetLabelStyle(tcell.StyleDefault.Background(tcell.Color16).Foreground(tcell.ColorWhite))
+
+	searchInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEscape {
+			searchQuery = ""
+			searchInput.SetText("")
+			searchInput.SetLabel("")
+			filteredItems = items
+			updateTable(filteredItems)
+			updatePreview()
+			table.Select(0, 0)
+			table.ScrollToBeginning()
+			app.SetFocus(table)
+		} else if key == tcell.KeyEnter {
+			app.SetFocus(table)
+		}
+	})
+
+searchInput.SetChangedFunc(func(text string) {
+		searchQuery = strings.ToLower(text)
+		if searchQuery == "" {
+			filteredItems = items
+		} else {
+			// This is much faster as it searches pre-computed, lower-cased text
+			newFilteredItems := make([]FeedItem, 0, len(filteredItems)) // Pre-allocate for efficiency
+			for _, item := range items {
+				if strings.Contains(item.SearchText, searchQuery) {
+					newFilteredItems = append(newFilteredItems, item)
+				}
+			}
+			filteredItems = newFilteredItems
+		}
+		updateTable(filteredItems)
+		updatePreview()
+	})
+
+	table.SetSelectionChangedFunc(func(row, column int) {
+		updatePreview()
+	})
+
+	table.SetDoneFunc(func(key tcell.Key) {
+		if key == 'q' {
 			app.Stop()
 		}
 	}).SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		row, _ := table.GetSelection()
+		
+		// Block upward movement at the top
+		if row == 0 && (event.Key() == tcell.KeyUp || event.Rune() == 'k') {
+			return nil
+		}
+		
+		// Block downward movement at the bottom
+		if row == len(filteredItems)-1 && (event.Key() == tcell.KeyDown || event.Rune() == 'j') {
+			return nil
+		}
+
+		if event.Key() == tcell.KeyEscape {
+			searchQuery = ""
+			searchInput.SetText("")
+			searchInput.SetLabel("")
+			filteredItems = items
+			updateTable(filteredItems)
+			updatePreview()
+			table.Select(0, 0)
+			table.ScrollToBeginning()
+		}
+
 		switch event.Rune() {
 		case 'q':
 			app.Stop()
 			return nil
 		case 'g':
-			table.Select(0, 0)
-			table.ScrollToBeginning()
+			if len(filteredItems) > 0 {
+				table.Select(0, 0)
+				table.ScrollToBeginning()
+			}
+			return nil
 		case 'G':
-			table.Select(len(items)-1, 0)
-			table.ScrollToEnd()
+			if len(filteredItems) > 0 {
+				table.Select(len(filteredItems)-1, 0)
+				table.ScrollToEnd()
+			}
+			return nil
+		case '/':
+			searchInput.SetLabel("/")
+			searchInput.SetText("")
+			searchQuery = ""
+			app.SetFocus(searchInput)
+			return nil
 		}
 		return event
 	})
 
+	var lastScrollTime time.Time
+	scrollThrottle := 10 * time.Millisecond
+
 	app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
+		// Throttle scroll events to prevent overwhelming the event loop
+		if action == tview.MouseScrollDown || action == tview.MouseScrollUp {
+			now := time.Now()
+			if now.Sub(lastScrollTime) < scrollThrottle {
+				return nil, 0 // Ignore this scroll event
+			}
+			lastScrollTime = now
+		}
+		
+		row, _ := table.GetSelection()
+		
 		if action == tview.MouseScrollDown {
-			app.QueueEvent(tcell.NewEventKey(tcell.KeyRune, 'j', tcell.ModNone))
-			return nil, 0 // Consume the event
+			if row < len(filteredItems)-1 {
+				table.Select(row+1, 0)
+			}
+			return nil, 0
 		} else if action == tview.MouseScrollUp {
-			app.QueueEvent(tcell.NewEventKey(tcell.KeyRune, 'k', tcell.ModNone))
-			return nil, 0 // Consume the event
+			if row > 0 {
+				table.Select(row-1, 0)
+			}
+			return nil, 0
 		}
 		return event, action
 	})
 
     table.SetSelectedFunc(func(row, column int) {
-        if row >= 0 && row < len(items) {
+        if row >= 0 && row < len(filteredItems) {
             var url string
-            if items[row].AudioURL != "" {
-                url = items[row].AudioURL
+            if filteredItems[row].AudioURL != "" {
+                url = filteredItems[row].AudioURL
             } else {
-                url = items[row].Link
+                url = filteredItems[row].Link
             }
             err := openURL(url)
             if err != nil {
@@ -111,7 +247,17 @@ func main() {
         }
     })
 
-	if err := app.SetRoot(table, true).EnableMouse(true).Run(); err != nil {
+	// Layout: table and preview side by side
+	contentFlex := tview.NewFlex().
+		AddItem(table, 0, 2, true).
+		AddItem(preview, 0, 1, false)
+
+	// Main layout: content on top, search on bottom
+	mainFlex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(contentFlex, 0, 1, true).
+		AddItem(searchInput, 1, 0, false)
+
+	if err := app.SetRoot(mainFlex, true).EnableMouse(true).Run(); err != nil {
 		panic(err)
 	}
 }
@@ -147,10 +293,13 @@ func CleanString(input string) string {
 }
 
 func FormatString(s string, length int) string {
-	if len(s) > length {
-		return s[:length] // Truncate to specified length
-	} else if len(s) < length {
-		return s + strings.Repeat(" ", length-len(s)) // Add spaces to make it specified length
+	runes := []rune(s)
+	runeCount := len(runes)
+	
+	if runeCount > length {
+		return string(runes[:length]) // Truncate to specified length
+	} else if runeCount < length {
+		return s + strings.Repeat(" ", length-runeCount) // Add spaces
 	}
 	return s
 }
@@ -198,14 +347,11 @@ func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
     var mutex sync.Mutex
     fp := gofeed.NewParser()
 
-    // Create channels for work distribution and results
-    jobs := make(chan FeedSource)
-    results := make(chan error)
+    jobs := make(chan FeedSource, len(feedSources))
+    results := make(chan error, len(feedSources))
     
-    // Number of concurrent workers (can be adjusted)
     workers := 5
     
-    // Start worker pool
     var wg sync.WaitGroup
     for w := 0; w < workers; w++ {
         wg.Add(1)
@@ -238,12 +384,28 @@ func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
                         }
                     }
 
+                    description := ""
+                    if item.Description != "" {
+                        description = item.Description
+                    } else if item.Content != "" {
+                        description = item.Content
+                    }
+
+					searchable := strings.Builder{}
+					searchable.WriteString(strings.ToLower(item.Title))
+					searchable.WriteString(" ")
+					searchable.WriteString(strings.ToLower(feedTitle))
+					searchable.WriteString(" ")
+					searchable.WriteString(strings.ToLower(description))
+
                     feedItems = append(feedItems, FeedItem{
-                        Title:     item.Title,
-                        Date:      pubDate,
-                        FeedTitle: feedTitle,
-                        Link:      item.Link,
-                        AudioURL:  audioURL,
+                        Title:       item.Title,
+                        Date:        pubDate,
+                        FeedTitle:   feedTitle,
+                        Link:        fixNitterLink(source.URL, item.Link),
+                        AudioURL:    audioURL,
+                        Description: description,
+						SearchText:  searchable.String(),
                     })
                 }
 
@@ -256,34 +418,29 @@ func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
         }()
     }
 
-    // Create progress counter
-    progress := 0
-    totalFeeds := len(feedSources)
-    
-    // Start a goroutine to distribute work
-    go func() {
-        for _, source := range feedSources {
-            jobs <- source
-        }
-        close(jobs)
-    }()
+    // Send all jobs
+    for _, source := range feedSources {
+        jobs <- source
+    }
+    close(jobs)
 
-    // Start a goroutine to collect results and update progress
+    // Start goroutine to close results channel when workers are done
     go func() {
-        for range feedSources {
-            err := <-results
-            progress++
-            if err != nil {
-                fmt.Printf("\n%v", err)
-            }
-            fmt.Printf("\rFetching %d/%d feeds...", progress, totalFeeds)
-        }
         wg.Wait()
         close(results)
     }()
 
-    // Wait for all workers to complete
-    wg.Wait()
+    // Collect results and display progress
+    totalFeeds := len(feedSources)
+    progress := 0
+    for err := range results {
+        progress++
+        if err != nil {
+            fmt.Printf("\n%v", err)
+        }
+        fmt.Printf("\rFetching %d/%d feeds...", progress, totalFeeds)
+    }
+    
     fmt.Println("\rFinished fetching all feeds.           ")
 
     // Sort items by date
@@ -292,6 +449,20 @@ func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
     })
 
     return items, nil
+}
+
+func fixNitterLink(feedURL, itemLink string) string {
+    // If feed is from a nitter instance, convert item links to x.com
+    if strings.Contains(feedURL, "nitter.") {
+        // Extract the path from any domain (nitter or not)
+        re := regexp.MustCompile(`https?://[^/]+/(.*)`)
+        if matches := re.FindStringSubmatch(itemLink); len(matches) > 1 {
+            // Remove hash fragment if present
+            path := strings.Split(matches[1], "#")[0]
+            return "https://x.com/" + path
+        }
+    }
+    return itemLink
 }
 
 func openURL(url string) error {
