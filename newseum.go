@@ -7,12 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
-	"regexp"
 	"strings"
-	"time"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/mmcdole/gofeed"
@@ -35,7 +36,7 @@ type FeedItem struct {
 }
 
 func main() {
-    fmt.Print("\033[H\033[2J")
+	fmt.Print("\033[H\033[2J")
 
 	feedSources, err := getFeedSources()
 	if err != nil {
@@ -52,9 +53,8 @@ func main() {
 	app := tview.NewApplication()
 	table := tview.NewTable().SetSelectable(true, false)
 	table.SetBackgroundColor(tcell.ColorDefault)
-    table.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
+	table.SetSelectedStyle(tcell.StyleDefault.Background(tcell.ColorWhite).Foreground(tcell.ColorBlack))
 
-	// Preview pane
 	preview := tview.NewTextView().
 		SetDynamicColors(true).
 		SetWordWrap(true).
@@ -62,11 +62,9 @@ func main() {
 	preview.SetBackgroundColor(tcell.ColorDefault)
 	preview.SetBorder(true).SetTitle(" Preview ")
 
-	// Search state
 	var searchQuery string
 	filteredItems := items
 
-	// Function to update table with current items
 	updateTable := func(itemsToShow []FeedItem) {
 		table.Clear()
 		now := time.Now().UTC()
@@ -87,7 +85,6 @@ func main() {
 		}
 	}
 
-	// Function to update preview
 	updatePreview := func() {
 		row, _ := table.GetSelection()
 		if row >= 0 && row < len(filteredItems) {
@@ -105,10 +102,9 @@ func main() {
 	updateTable(filteredItems)
 	updatePreview()
 
-	// Search input field
 	searchInput := tview.NewInputField().SetLabel("")
 	searchInput.SetBackgroundColor(tcell.Color16)
-    searchInput.SetFieldStyle(tcell.StyleDefault.Background(tcell.Color16).Foreground(tcell.ColorWhite))
+	searchInput.SetFieldStyle(tcell.StyleDefault.Background(tcell.Color16).Foreground(tcell.ColorWhite))
 	searchInput.SetLabelStyle(tcell.StyleDefault.Background(tcell.Color16).Foreground(tcell.ColorWhite))
 
 	searchInput.SetDoneFunc(func(key tcell.Key) {
@@ -127,13 +123,12 @@ func main() {
 		}
 	})
 
-searchInput.SetChangedFunc(func(text string) {
+	searchInput.SetChangedFunc(func(text string) {
 		searchQuery = strings.ToLower(text)
 		if searchQuery == "" {
 			filteredItems = items
 		} else {
-			// This is much faster as it searches pre-computed, lower-cased text
-			newFilteredItems := make([]FeedItem, 0, len(filteredItems)) // Pre-allocate for efficiency
+			newFilteredItems := make([]FeedItem, 0, len(filteredItems))
 			for _, item := range items {
 				if strings.Contains(item.SearchText, searchQuery) {
 					newFilteredItems = append(newFilteredItems, item)
@@ -155,13 +150,11 @@ searchInput.SetChangedFunc(func(text string) {
 		}
 	}).SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		row, _ := table.GetSelection()
-		
-		// Block upward movement at the top
+
 		if row == 0 && (event.Key() == tcell.KeyUp || event.Rune() == 'k') {
 			return nil
 		}
-		
-		// Block downward movement at the bottom
+
 		if row == len(filteredItems)-1 && (event.Key() == tcell.KeyDown || event.Rune() == 'j') {
 			return nil
 		}
@@ -207,17 +200,16 @@ searchInput.SetChangedFunc(func(text string) {
 	scrollThrottle := 10 * time.Millisecond
 
 	app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
-		// Throttle scroll events to prevent overwhelming the event loop
 		if action == tview.MouseScrollDown || action == tview.MouseScrollUp {
 			now := time.Now()
 			if now.Sub(lastScrollTime) < scrollThrottle {
-				return nil, 0 // Ignore this scroll event
+				return nil, 0
 			}
 			lastScrollTime = now
 		}
-		
+
 		row, _ := table.GetSelection()
-		
+
 		if action == tview.MouseScrollDown {
 			if row < len(filteredItems)-1 {
 				table.Select(row+1, 0)
@@ -232,27 +224,16 @@ searchInput.SetChangedFunc(func(text string) {
 		return event, action
 	})
 
-    table.SetSelectedFunc(func(row, column int) {
-        if row >= 0 && row < len(filteredItems) {
-            var url string
-            if filteredItems[row].AudioURL != "" {
-                url = filteredItems[row].AudioURL
-            } else {
-                url = filteredItems[row].Link
-            }
-            err := openURL(url)
-            if err != nil {
-                fmt.Println("Error opening browser:", err)
-            }
-        }
-    })
+	table.SetSelectedFunc(func(row, column int) {
+		if row >= 0 && row < len(filteredItems) {
+			openURL(filteredItems[row])
+		}
+	})
 
-	// Layout: table and preview side by side
 	contentFlex := tview.NewFlex().
 		AddItem(table, 0, 2, true).
 		AddItem(preview, 0, 1, false)
 
-	// Main layout: content on top, search on bottom
 	mainFlex := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(contentFlex, 0, 1, true).
 		AddItem(searchInput, 1, 0, false)
@@ -263,31 +244,30 @@ searchInput.SetChangedFunc(func(text string) {
 }
 
 func formatDate(date time.Time, now time.Time) string {
-    if date.IsZero() {
-        return "Unknown date"
-    }
+	if date.IsZero() {
+		return "Unknown date"
+	}
 
-    // Convert UTC time to local time
-    localDate := date.Local()
-    localNow := now.Local()
+	localDate := date.Local()
+	localNow := now.Local()
 
-    duration := localNow.Sub(localDate)
-    if duration < 24*time.Hour && localDate.Day() == localNow.Day() {
-        return "Today at " + localDate.Format("3:04 PM")
-    } else if duration < 48*time.Hour && localDate.Day() == localNow.AddDate(0, 0, -1).Day() {
-        return "Yesterday at " + localDate.Format("3:04 PM")
-    } else if duration < 7*24*time.Hour {
-        return localDate.Format("Monday at 3:04 PM")
-    } else {
-        return localDate.Format("January 2, 2006")
-    }
+	duration := localNow.Sub(localDate)
+	if duration < 24*time.Hour && localDate.Day() == localNow.Day() {
+		return "Today at " + localDate.Format("3:04 PM")
+	} else if duration < 48*time.Hour && localDate.Day() == localNow.AddDate(0, 0, -1).Day() {
+		return "Yesterday at " + localDate.Format("3:04 PM")
+	} else if duration < 7*24*time.Hour {
+		return localDate.Format("Monday at 3:04 PM")
+	} else {
+		return localDate.Format("January 2, 2006")
+	}
 }
 
 func CleanString(input string) string {
 	whitespaceRegex := regexp.MustCompile(`\s+`)
 	trimmed := whitespaceRegex.ReplaceAllString(input, " ")
-    trimmed = strings.ReplaceAll(trimmed, "[", "(")
-    trimmed = strings.ReplaceAll(trimmed, "]", ")")
+	trimmed = strings.ReplaceAll(trimmed, "[", "(")
+	trimmed = strings.ReplaceAll(trimmed, "]", ")")
 
 	return strings.TrimSpace(trimmed)
 }
@@ -295,11 +275,11 @@ func CleanString(input string) string {
 func FormatString(s string, length int) string {
 	runes := []rune(s)
 	runeCount := len(runes)
-	
+
 	if runeCount > length {
-		return string(runes[:length]) // Truncate to specified length
+		return string(runes[:length])
 	} else if runeCount < length {
-		return s + strings.Repeat(" ", length-runeCount) // Add spaces
+		return s + strings.Repeat(" ", length-runeCount)
 	}
 	return s
 }
@@ -322,7 +302,7 @@ func getFeedSources() ([]FeedSource, error) {
 	defer file.Close()
 
 	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = 2 // Expect 2 fields per record: name and URL
+	reader.FieldsPerRecord = 2
 
 	var feedSources []FeedSource
 	for {
@@ -343,53 +323,53 @@ func getFeedSources() ([]FeedSource, error) {
 }
 
 func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
-    var items []FeedItem
-    var mutex sync.Mutex
-    fp := gofeed.NewParser()
+	var items []FeedItem
+	var mutex sync.Mutex
+	fp := gofeed.NewParser()
 
-    jobs := make(chan FeedSource, len(feedSources))
-    results := make(chan error, len(feedSources))
-    
-    workers := 5
-    
-    var wg sync.WaitGroup
-    for w := 0; w < workers; w++ {
-        wg.Add(1)
-        go func() {
-            defer wg.Done()
-            for source := range jobs {
-                feed, err := fp.ParseURL(source.URL)
-                if err != nil {
-                    results <- fmt.Errorf("error parsing feed %s: %v", source.URL, err)
-                    continue
-                }
+	jobs := make(chan FeedSource, len(feedSources))
+	results := make(chan error, len(feedSources))
 
-                feedTitle := source.Name
-                if feedTitle == "" {
-                    feedTitle = feed.Title
-                }
+	workers := 5
 
-                var feedItems []FeedItem
-                for _, item := range feed.Items {
-                    pubDate := time.Now().UTC()
-                    if item.PublishedParsed != nil {
-                        pubDate = item.PublishedParsed.UTC()
-                    }
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for source := range jobs {
+				feed, err := fp.ParseURL(source.URL)
+				if err != nil {
+					results <- fmt.Errorf("error parsing feed %s: %v", source.URL, err)
+					continue
+				}
 
-                    audioURL := ""
-                    for _, enclosure := range item.Enclosures {
-                        if strings.HasPrefix(enclosure.Type, "audio/") {
-                            audioURL = enclosure.URL
-                            break
-                        }
-                    }
+				feedTitle := source.Name
+				if feedTitle == "" {
+					feedTitle = feed.Title
+				}
 
-                    description := ""
-                    if item.Description != "" {
-                        description = item.Description
-                    } else if item.Content != "" {
-                        description = item.Content
-                    }
+				var feedItems []FeedItem
+				for _, item := range feed.Items {
+					pubDate := time.Now().UTC()
+					if item.PublishedParsed != nil {
+						pubDate = item.PublishedParsed.UTC()
+					}
+
+					audioURL := ""
+					for _, enclosure := range item.Enclosures {
+						if strings.HasPrefix(enclosure.Type, "audio/") {
+							audioURL = enclosure.URL
+							break
+						}
+					}
+
+					description := ""
+					if item.Description != "" {
+						description = item.Description
+					} else if item.Content != "" {
+						description = item.Content
+					}
 
 					searchable := strings.Builder{}
 					searchable.WriteString(strings.ToLower(item.Title))
@@ -398,119 +378,99 @@ func fetchFeeds(feedSources []FeedSource) ([]FeedItem, error) {
 					searchable.WriteString(" ")
 					searchable.WriteString(strings.ToLower(description))
 
-                    feedItems = append(feedItems, FeedItem{
-                        Title:       item.Title,
-                        Date:        pubDate,
-                        FeedTitle:   feedTitle,
-                        Link:        fixNitterLink(source.URL, item.Link),
-                        AudioURL:    audioURL,
-                        Description: description,
+					feedItems = append(feedItems, FeedItem{
+						Title:       item.Title,
+						Date:        pubDate,
+						FeedTitle:   feedTitle,
+						Link:        fixNitterLink(source.URL, item.Link),
+						AudioURL:    audioURL,
+						Description: description,
 						SearchText:  searchable.String(),
-                    })
-                }
+					})
+				}
 
-                mutex.Lock()
-                items = append(items, feedItems...)
-                mutex.Unlock()
-                
-                results <- nil
-            }
-        }()
-    }
+				mutex.Lock()
+				items = append(items, feedItems...)
+				mutex.Unlock()
 
-    // Send all jobs
-    for _, source := range feedSources {
-        jobs <- source
-    }
-    close(jobs)
+				results <- nil
+			}
+		}()
+	}
 
-    // Start goroutine to close results channel when workers are done
-    go func() {
-        wg.Wait()
-        close(results)
-    }()
+	for _, source := range feedSources {
+		jobs <- source
+	}
+	close(jobs)
 
-    // Collect results and display progress
-    totalFeeds := len(feedSources)
-    progress := 0
-    for err := range results {
-        progress++
-        if err != nil {
-            fmt.Printf("\n%v", err)
-        }
-        fmt.Printf("\rFetching %d/%d feeds...", progress, totalFeeds)
-    }
-    
-    fmt.Println("\rFinished fetching all feeds.           ")
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-    // Sort items by date
-    sort.Slice(items, func(i, j int) bool {
-        return items[i].Date.After(items[j].Date)
-    })
+	totalFeeds := len(feedSources)
+	progress := 0
+	for err := range results {
+		progress++
+		if err != nil {
+			fmt.Printf("\n%v", err)
+		}
+		fmt.Printf("\rFetching %d/%d feeds...", progress, totalFeeds)
+	}
 
-    return items, nil
+	fmt.Println("\rFinished fetching all feeds.           ")
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Date.After(items[j].Date)
+	})
+
+	return items, nil
 }
 
 func fixNitterLink(feedURL, itemLink string) string {
-    // If feed is from a nitter instance, convert item links to x.com
-    if strings.Contains(feedURL, "nitter.") {
-        // Extract the path from any domain (nitter or not)
-        re := regexp.MustCompile(`https?://[^/]+/(.*)`)
-        if matches := re.FindStringSubmatch(itemLink); len(matches) > 1 {
-            // Remove hash fragment if present
-            path := strings.Split(matches[1], "#")[0]
-            return "https://x.com/" + path
-        }
-    }
-    return itemLink
+	if strings.Contains(feedURL, "nitter.") {
+		re := regexp.MustCompile(`https?://[^/]+/(.*)`)
+		if matches := re.FindStringSubmatch(itemLink); len(matches) > 1 {
+			path := strings.Split(matches[1], "#")[0]
+			return "https://x.com/" + path
+		}
+	}
+	return itemLink
 }
 
-func openURL(url string) error {
-    lowerURL := strings.ToLower(url)
-    
-    // Check for media URLs
-    isAudio := regexp.MustCompile(`\.(mp3|wav)(?:\?.*)?$`).MatchString(lowerURL)
-    isYoutube := strings.Contains(lowerURL, "youtube.com") || strings.Contains(lowerURL, "youtu.be")
-    
-    if (isAudio || isYoutube) && runtime.GOOS == "linux" {
-        var mimeType string
-        if isYoutube {
-            mimeType = "video/mp4" // More appropriate for YouTube content
-        } else if strings.Contains(lowerURL, ".mp3") {
-            mimeType = "audio/mpeg"
-        } else {
-            mimeType = "audio/wav"
-        }
+func openURL(item FeedItem) error {
+	var url string
+	if item.AudioURL != "" {
+		url = item.AudioURL
+	} else {
+		url = item.Link
+	}
 
-        // Get default application for media type
-        cmd := exec.Command("xdg-mime", "query", "default", mimeType)
-        output, err := cmd.Output()
-        if err != nil {
-            return fmt.Errorf("error querying default media application: %v", err)
-        }
-        
-        desktopFile := strings.TrimSpace(string(output))
-        if desktopFile == "" {
-            return fmt.Errorf("no default application found for %s", mimeType)
-        }
+	lowerURL := strings.ToLower(url)
+	isAudio := regexp.MustCompile(`\.(mp3|wav|m4a|ogg|opus)(?:\?.*)?$`).MatchString(lowerURL)
+	isYoutube := strings.Contains(lowerURL, "youtube.com") || strings.Contains(lowerURL, "youtu.be")
 
-        // Launch the media file with the default application
-        return exec.Command("gtk-launch", desktopFile, url).Start()
-    }
+	if (isAudio || isYoutube) && (runtime.GOOS == "linux" || runtime.GOOS == "darwin") {
+		cmd := exec.Command("mpv", "--force-media-title="+item.Title, url)
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+		return cmd.Start()
+	}
 
-    // For non-media files or non-Linux systems, use the original browser opening logic
-    var cmd string
-    var args []string
+	var cmd string
+	var args []string
 
-    switch runtime.GOOS {
-    case "windows":
-        cmd = "cmd"
-        args = []string{"/c", "start"}
-    case "darwin":
-        cmd = "open"
-    default: // "linux", "freebsd", "openbsd", "netbsd"
-        cmd = "xdg-open"
-    }
-    args = append(args, url)
-    return exec.Command(cmd, args...).Start()
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start", url}
+		return exec.Command(cmd, args...).Start()
+	case "darwin":
+		cmd = "open"
+	default:
+		cmd = "xdg-open"
+	}
+	args = append(args, url)
+	return exec.Command(cmd, args...).Start()
 }
