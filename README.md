@@ -24,3 +24,5 @@ Run:
 ```
 newseum
 ```
+
+There will also be a new desktop entry called "Newseum" that you can run.
