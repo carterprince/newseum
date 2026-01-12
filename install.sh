@@ -1,8 +1,6 @@
-#!/bin/bash
+#!/bin/bash -ex
 
-set -ex
-
-go mod tidy && \
-go build && \
+go mod tidy
+go build
 sudo install ./newseum /usr/local/bin/newseum
 sudo install ./newseum.desktop /usr/share/applications/newseum.desktop
